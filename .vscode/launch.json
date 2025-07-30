@@ -1,0 +1,14 @@
+{
+    "configurations": [
+        {
+            "type": "java",
+            "name": "Spring Boot-ErrorCauseAIAnalyzerApplication<error-cause-ai-analyzer-app>",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "mainClass": "com.rj.analyzer.ErrorCauseAIAnalyzerApplication",
+            "projectName": "error-cause-ai-analyzer-app",
+            "args": "",
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ]
+}

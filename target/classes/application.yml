@@ -1,0 +1,20 @@
+spring.application.name: error-cause-ai-analyzer-app
+
+spring.ai.model.chat: ollama
+
+spring.ai.ollama:
+  base-url: http://localhost:11434
+  init.chat.include: true
+  chat.options:
+    # model: llama3 # this model is latest, but taking time
+    # model: starcoder2 # lightweight model, best for code analysis
+    model: gemma3:1b # gemma3:1b is a good balance between performance and speed with 800mb
+    temperature: 0.2 # Lower temperature for more deterministic responses
+    top-p: 0.9
+    top-k: 50
+    presence-penalty: 0.0
+    frequency-penalty: 0.0
+    response-format: text
+    stream: true
+    max-tokens: 5000
+
