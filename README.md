@@ -101,8 +101,8 @@ This application uses Spring Boot and Spring AI to analyze error causes using AI
    ```
 
 2. **Run the application:**
-   ```sh
-   mvn spring-boot:run
+   ```
+   http://localhost:8080/run
    ```
 
 3. **Ensure Ollama is running before starting the application.**
