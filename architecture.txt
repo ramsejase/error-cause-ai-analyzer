@@ -1,0 +1,1509 @@
+📘 AI-Driven ETL Error Analyzer – Full Architecture & Implementation Document
+🟦 1. Introduction
+
+The objective of this project is to build an AI-powered error analysis system that automatically detects, analyzes, and explains production failures in 100+ ETL applications (80 Java Spring Boot apps and ~20 serverless apps).
+
+These applications run complex ETL pipelines that process tens of thousands of records, and errors often occur deep inside multi-stage transformations. Manually identifying the root cause requires a senior developer with detailed knowledge of code logic and data structures.
+
+The immediate goals are:
+
+Automate debugging of ETL failures using AI
+
+Deliver accurate, code-driven root cause analysis
+
+Reduce Mean Time To Resolution (MTTR)
+
+Avoid repeat errors by detecting patterns early
+
+Keep all data and AI inference inside the secure internal network
+
+This solution uses:
+
+Java + Spring Boot + Spring AI
+
+Local AI models via Ollama
+
+Vector DB (Qdrant) for code-based RAG
+
+Kafka/SQS for async scalable processing
+
+Logback HTTP appender for clean integration with existing apps
+
+The system is deployed in EKS and operates entirely offline.
+
+
+🟦 2. Architecture
+2.1 High-Level Architecture Diagram
+ETL Applications (Java 80, Serverless 20)
+        │
+        └─▶ Error Logs (HTTP via Logback)
+                   │
+                   ▼
+         Central Log Receiver API
+         (Spring Boot)
+                   │
+                   └─▶ Kafka / SQS (async)
+                                │
+                                ▼
+                   Analyzer Engine Worker
+                   (Spring Boot + Spring AI)
+                                │
+            ┌───────────────────┼───────────────────┐
+            │                   │                   │
+            ▼                   ▼                   ▼
+   Repo Manager         Vector DB Retriever      Local LLM (Ollama)
+ (Clone/Cache Code)     (Code-based RAG)         (Gemma3/Llama3)
+            │                   │                   │
+            └──────────► Confidence Scored Root Cause ◄────────────┘
+                                │
+                                ▼
+                    Output (Jira, Slack, Email, DB)
+
+2.2 Architecture Components
+1. ETL App Logback Integration (Zero Code Change)
+
+Each ETL app sends its ERROR logs to the central AI service using a Logback HTTP appender.
+Only logback.xml is updated — no source code changes.
+
+2. Central Log Receiver API
+
+A lightweight Spring Boot API receives the JSON error payload and publishes it to Kafka/SQS.
+This ensures ETL apps never wait on analysis.
+
+3. Kafka/SQS
+
+Provides:
+
+	Asynchronous processing
+	High throughput
+	Backpressure and buffering
+	Guaranteed delivery
+
+4. Analyzer Engine Worker
+
+This is the core AI system:
+	Pulls messages from Kafka/SQS
+	Clones the app’s code repo (first time only)
+	Does incremental code updates on new commits
+	Embeds updated code to vector DB
+	Retrieves matching code sections using class/line numbers
+	Sends combined context (code + stacktrace + metadata) to a local LLM
+	Generates actionable root cause and fix suggestions
+
+
+5. Repo Manager (Per-App Git Caching)
+
+Each application’s codebase is stored in:	/data/repos/<appName>/
+
+
+The system:
+Clones once
+Uses git fetch to stay up to date
+Detects changed files
+Re-embeds only changed files
+This makes RAG extremely efficient.
+To bring new code to the into the existing code, create a new api-endpoint to bring the new code to update the oldcode.
+
+6. Code-Based RAG via Vector DB
+
+The system creates semantic embeddings of:
+Java classes
+Pipeline code (transformers, mappers, validators)
+Config files (YAML, JSON, mapping rules)
+SQL scripts
+ETL documentation
+Retrieval is done using:
+class name
+file name
+line number proximity
+vector similarity
+
+7. LLM Reasoning (Local Ollama)
+
+Models like:
+
+gemma3:2b (fast and accurate)
+llama3.1:8b (best accuracy with GPUs)
+
+LLM receives:
+stacktrace
+failing input data
+retrieved code chunks
+metadata
+pipeline context
+Produces structured JSON output.
+
+
+🟦 3. Why This AI Approach Is Required
+✔ 1. Logs alone do NOT contain enough information
+
+Stack traces show where it failed, but not why.
+Code is required to identify the root cause and logic failure.
+
+✔ 2. ETL data sets are huge (100k+ records)
+
+Only a small sample of failing records is logged.
+The analyzer must infer the cause from the code logic.
+
+✔ 3. Need to stop repeating errors
+
+The analyzer deduplicates similar errors based on:
+
+app name
+stacktrace hash
+commit ID
+pipeline stage
+This prevents overload and detects recurring defects automatically.
+
+✔ 4. Code-based RAG enables real debugging
+
+RAG retrieves:
+
+exact failing lines
+upstream/downstream logic
+mapping rules
+transformations
+validation logic
+LLM can then explain:
+why the logic broke
+what condition triggered the error
+how to fix it
+
+✔ 5. Fully private, secure, offline
+
+All processing happens in EKS with no internet.
+
+
+4.5. Sample Logback XML in ETL Apps
+<appender name="HTTP" class="ch.qos.logback.core.net.SocketAppender">
+    <remoteHost>central-ai-api</remoteHost>
+    <port>8080</port>
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder" />
+</appender>
+
+<root level="ERROR">
+    <appender-ref ref="HTTP" />
+</root>
+
+
+-----------------------
+
+1. API Endpoint to Update Git Repo / Branch / Tag
+
+This is a very good and necessary idea.
+
+Why?
+
+Because:
+
+ETL apps deploy different branches/tags
+
+Production may run release/2025.01 while Git default branch is main
+
+If the analyzer always pulls “main,” analysis may be wrong
+
+You need an exact match between the deployed version and the code analyzed
+
+Recommended Solution
+
+Add a simple API like:
+
+POST /repo/update
+{
+    "appName": "etl-customer",
+    "repoUrl": "git@github.com/company/etl-customer.git",
+    "branch": "release-2025-Q1"
+}
+Also include in ETL log payload:
+
+commitId
+
+branchName
+
+This gives 100% accurate code-to-execution mapping.
+
+------------------------
+
+
+✅ 3. Application Personas
+
+✔ The Good Part
+
+A persona file per app, containing:
+
+What the ETL app does
+
+Data flow
+
+Pipeline stages
+
+Transformation logic description
+
+Mapping rules
+
+Schema relations
+
+This gives the LLM strong domain context, which results in:
+
+More accurate debugging
+
+Fewer hallucinations
+
+Better reasoning
+
+Better fix recommendations
+
+This functions like a “mini documentation knowledge base” per app.
+
+This is beneficial.
+
+for every payload the LLM model will use the persona to get better understanding and get the context.
+
+--------------------------------
+
+
+✔ 1.1 API Contract (Design)
+Endpoint
+POST /repo/update
+
+Request Payload
+{
+  "appName": "etl-customer-profile",
+  "repoUrl": "git@github.com/company/etl-customer-profile.git",
+  "branchOrTag": "release-2025-Q1",
+  "commitId": "f1a3bcdd2e"
+}
+
+Response
+{
+  "status": "OK",
+  "message": "Repo updated successfully",
+  "updated": true
+}
+
+
+✔ 1.2 Spring Boot API Code
+DTO
+@Data
+public class RepoUpdateRequest {
+    private String appName;
+    private String repoUrl;
+    private String branchOrTag;
+    private String commitId;
+}
+
+Controller
+@RestController
+@RequestMapping("/repo")
+public class RepoUpdateController {
+
+    @Autowired
+    private RepoManagerService repoManagerService;
+
+    @PostMapping("/update")
+    public ResponseEntity<?> updateRepo(@RequestBody RepoUpdateRequest request) {
+        boolean updated = repoManagerService.updateRepository(request);
+        return ResponseEntity.ok(Map.of(
+                "status", "OK",
+                "message", "Repo updated successfully",
+                "updated", updated
+        ));
+    }
+}
+
+
+🟦 2. Persona File Structure Template
+
+Each ETL app gets its own persona directory:
+
+/knowledge/<appName>/
+    persona.md
+    architecture.md
+    pipeline-specs.md
+    business-rules.md
+    data-contract.md
+
+
+
+🟦 3. RAG Retrieval Prioritization Logic
+
+RAG should NOT retrieve all code.
+It should retrieve only the most relevant chunks.
+
+Here is the priority order:
+
+Priority 1 — Direct Stacktrace Hit (Highest Weight)
+
+Extract from stacktrace:
+
+fully qualified class
+
+file name
+
+line number
+
+Retrieve:
+
+that exact file
+
+± 50–100 lines around failing line
+
+adjacent methods
+
+Why?
+This is always the most accurate signal.
+
+
+Priority 2 — Upstream / Downstream Logic
+
+If stacktrace shows:
+
+AddressNormalizer.cleanse(...)
+Mapper.mapToDomain(...)
+
+
+Then also retrieve these files.
+
+Logic:
+
+based on call hierarchy
+
+based on package structure
+
+Priority 3 — Persona Files
+
+These always help the LLM understand:
+
+pipeline context
+
+data flow
+
+domain rules
+
+Retrieve 100% of the persona files.
+
+Priority 4 — Configuration & Mapping Files
+
+YAML
+
+JSON schemas
+
+mapping rules
+
+SQL scripts
+
+property files
+
+Especially if log mentions:
+
+missing field
+
+schema mismatch
+
+invalid mapping
+
+Priority 5 — Vector Similarity Search
+
+Search for embeddings using:
+
+method names
+
+error keywords
+
+class names
+
+pipelineStage value
+
+Priority 6 — Historical Similar Issues
+
+From vector DB, retrieve:
+
+prior root cause summaries
+
+patches
+
+similar error signatures
+
+
+
+4.1 Logical Architecture
+                  Kafka/SQS
+                      │
+                      ▼
+          ┌────────────────────────┐
+          │ Analyzer Worker Service│
+          └────────────────────────┘
+                      │
+     ┌────────────────┼────────────────┬──────────────────┐
+     ▼                ▼                ▼                  ▼
+Extractor      Repo Manager        RAG Engine         LLM Engine
+     │                │                │                  │
+     └─────► normalized payload       │                  │
+                      │                │                  │
+                      └────► retrieved code & specs       ▼
+                                              ┌──────────────┐
+                                              │ LLM Prompting │
+                                              └──────────────┘
+                                                          │
+                                                          ▼
+                                               Structured Root Cause
+
+
+4.2 Pipeline Steps (Detailed)
+Step 1: Payload Extraction
+
+Parse stacktrace
+
+Extract class, file, line
+
+Extract pipelineStage
+
+Extract commitId
+
+Validate input JSON
+
+Step 2: Repo Manager
+
+Clone if not exists
+
+Fetch/checkout correct branch or tag
+
+Checkout specific commit if provided
+
+Detect changed files
+
+Re-embed only changed code
+
+Step 3: RAG Retrieval
+
+Search by class + file + line
+
+Surrounding code context
+
+Persona files
+
+Mapping configs
+
+Transformer files
+
+Pipeline specifications
+
+Step 4: LLM Prompt Generation
+
+Include:
+
+error payload
+
+retrieved code chunks
+
+persona details
+
+transformation docs
+
+Ask LLM for:
+
+root cause
+
+suggested fix
+
+severity
+
+actionable steps
+
+Step 5: Output Handling
+
+Save result to database
+
+Publish result to Slack/Jira/email
+
+Deduplicate future identical issues
+
+
+
+
+------------------------------------------
+
+
+5.2 Clone Repo
+private void cloneRepo(RepoUpdateRequest req, Path repoPath) throws Exception {
+    Git.cloneRepository()
+            .setURI(req.getRepoUrl())
+            .setBranch(req.getBranchOrTag())
+            .setDirectory(repoPath.toFile())
+            .call();
+
+    checkoutCommitIfNeeded(req, repoPath);
+}
+
+5.3 Fetch + Checkout
+private void fetchAndCheckout(RepoUpdateRequest req, Path repoPath) throws Exception {
+    try (Git git = Git.open(repoPath.toFile())) {
+
+        git.fetch().setForceUpdate(true).call();
+
+        git.checkout()
+                .setName(req.getBranchOrTag())
+                .setForced(true)
+                .call();
+
+        checkoutCommitIfNeeded(req, repoPath);
+    }
+}
+
+5.4 Checkout Commit (Optional)
+private void checkoutCommitIfNeeded(RepoUpdateRequest req, Path repoPath) throws Exception {
+    if (req.getCommitId() == null || req.getCommitId().isBlank()) return;
+
+    try (Git git = Git.open(repoPath.toFile())) {
+        git.checkout()
+                .setName(req.getCommitId())
+                .setForced(true)
+                .call();
+    }
+}
+
+
+
+🟦 6. Full System Sequence Diagram
+participant ETL App
+participant Logback
+participant Central Log API
+participant Kafka
+participant Analyzer Worker
+participant Repo Manager
+participant VectorDB
+participant LLM
+
+ETL App->Logback: ERROR Log event
+Logback->Central Log API: HTTP JSON POST
+Central Log API->Kafka: publish(errorPayload)
+Kafka->Analyzer Worker: consume(errorPayload)
+
+Analyzer Worker->Extractor: parse stacktrace, metadata
+Extractor->Repo Manager: request codebase for app
+Repo Manager->Git: clone/fetch/checkout
+Repo Manager->Analyzer Worker: code ready
+
+Analyzer Worker->VectorDB: retrieve code chunks
+Analyzer Worker->VectorDB: retrieve persona & specs
+VectorDB->Analyzer Worker: relevant context
+
+Analyzer Worker->LLM: prompt with code + payload
+LLM->Analyzer Worker: structured root cause
+
+Analyzer Worker->DB/Slack/Jira: send analysis result
+
+
+==============================
+
+
+You are an expert Java ETL pipeline debugging assistant. 
+You must analyze the application code, error payload, persona, and pipeline specifications 
+to find the exact root cause, without hallucinating. Only use the given context.
+
+# --------------------- INPUTS ---------------------
+## ERROR PAYLOAD (JSON)
+{{errorPayload}}
+
+## STACKTRACE
+{{stacktrace}}
+
+## INPUT DATA (TRUNCATED)
+{{inputData}}
+
+## APPLICATION PERSONA
+{{persona}}
+
+## PIPELINE SPECIFICATIONS
+{{pipelineSpecs}}
+
+## RELEVANT CODE SNIPPETS (ordered by priority)
+{{codeSnippets}}
+
+# --------------------- TASK ---------------------
+Your task:
+1. Identify the exact root cause.  
+2. Explain why it failed using the given code.  
+3. Match the failure with application domain rules.  
+4. Suggest the minimal fix, with file + method name.  
+5. Suggest additional improvements (optional).  
+6. Provide severity (HIGH / MEDIUM / LOW).  
+7. State confidence level (0–100%).
+
+# --------------------- OUTPUT FORMAT ---------------------
+Output ONLY valid JSON:
+
+{
+  "rootCause": "",
+  "failedComponent": "",
+  "lineNumber": "",
+  "explanation": "",
+  "suggestedFix": "",
+  "severity": "",
+  "confidence": "",
+  "relatedFiles": [],
+  "pipelineStage": "",
+  "errorCategory": "",
+  "duplicateSignature": ""
+}
+
+
+=====================================================
+
+
+<dependencies>
+    <!-- Spring AI Ollama -->
+    <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-ollama-spring-boot-starter</artifactId>
+    </dependency>
+
+    <!-- Kafka -->
+    <dependency>
+        <groupId>org.springframework.kafka</groupId>
+        <artifactId>spring-kafka</artifactId>
+    </dependency>
+
+    <!-- JGit -->
+    <dependency>
+        <groupId>org.eclipse.jgit</groupId>
+        <artifactId>org.eclipse.jgit</artifactId>
+        <version>6.9.0.202403050737-r</version>
+    </dependency>
+
+    <!-- Vector store (Spring AI - Milvus/PGVector) -->
+    <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-pgvector-store-spring-boot-starter</artifactId>
+    </dependency>
+
+    <!-- JSON Processing -->
+    <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+    </dependency>
+
+    <!-- Lombok -->
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+    </dependency>
+</dependencies>
+
+
+===============================================
+
+@Service
+@RequiredArgsConstructor
+public class ErrorEventConsumer {
+
+    private final AnalyzerService analyzerService;
+
+    @KafkaListener(topics = "etl-errors", groupId = "ai-analyzer")
+    public void consume(String errorJson) {
+        analyzerService.processError(errorJson);
+    }
+}
+
+======================================================
+
+
+@Service
+@RequiredArgsConstructor
+public class AnalyzerService {
+
+    private final RepoManagerService repoManager;
+    private final RagService ragService;
+    private final LlmService llmService;
+
+    public void processError(String errorJson) {
+
+        ErrorPayload payload = ErrorPayload.fromJson(errorJson);
+
+        // Checkout correct repo version
+        Path repoPath = repoManager.getRepo(payload);
+
+        // Build RAG context
+        RagContext ctx = ragService.buildContext(payload, repoPath);
+
+        // Call LLM
+        String result = llmService.analyze(ctx);
+
+        // TODO: save to DB or notify Slack/Jira
+        System.out.println(result);
+    }
+}
+
+
+
+==========================================================
+
+
+✅ 3. RAG INDEXER MODULE
+
+This module:
+
+indexes Java source code
+
+splits files into semantic chunks
+
+stores embeddings in PGVector / Milvus
+
+retrieves based on stacktrace + semantic similarity
+
+
+
+@Service
+@RequiredArgsConstructor
+public class RagService {
+
+    private final VectorStore vectorStore;
+    private final PersonaService personaService;
+
+    public RagContext buildContext(ErrorPayload payload, Path repoPath) {
+
+        // Extract stacktrace locations
+        var loc = StacktraceParser.extract(payload.getStacktrace());
+
+        // 1. Retrieve exact file hit
+        List<String> exactCode = retrieveExactContext(repoPath, loc);
+
+        // 2. Retrieve similar code using embeddings
+        List<String> similarCode = semanticRetrieve(loc);
+
+        // 3. Load persona + pipeline specs
+        String persona = personaService.loadPersona(payload.getAppName());
+
+        return new RagContext(
+                payload,
+                exactCode,
+                similarCode,
+                persona
+        );
+    }
+
+    private List<String> retrieveExactContext(Path repo, StackLocation loc) {
+        Path file = repo.resolve("src/main/java/" + loc.classPath());
+        return CodeUtils.extractLines(file, loc.getLineNumber(), 80);
+    }
+
+    private List<String> semanticRetrieve(StackLocation loc) {
+        return vectorStore.similaritySearch(loc.getClassName(), 10)
+                .stream()
+                .map(Document::getContent)
+                .collect(Collectors.toList());
+    }
+}
+
+
+==========================================
+
+
+
+@Service
+@RequiredArgsConstructor
+public class LlmService {
+
+    private final ChatClient chatClient;
+
+    public String analyze(RagContext ctx) {
+
+        Prompt prompt = Prompt.builder()
+                .template("error-analysis")
+                .add("errorPayload", ctx.payload().asJson())
+                .add("stacktrace", ctx.payload().getStacktrace())
+                .add("inputData", ctx.payload().getInputData())
+                .add("persona", ctx.persona())
+                .add("pipelineSpecs", ctx.pipelineSpecs())
+                .add("codeSnippets", ctx.codeAsText())
+                .build();
+
+        return chatClient.prompt(prompt).call().getResult().getOutputText();
+    }
+}
+
+
+===================================================
+
+
+@Service
+@RequiredArgsConstructor
+public class LlmService {
+
+    private final ChatClient chatClient;
+
+    public String analyze(RagContext ctx) {
+
+        Prompt prompt = Prompt.builder()
+                .template("error-analysis")
+                .add("errorPayload", ctx.payload().asJson())
+                .add("stacktrace", ctx.payload().getStacktrace())
+                .add("inputData", ctx.payload().getInputData())
+                .add("persona", ctx.persona())
+                .add("pipelineSpecs", ctx.pipelineSpecs())
+                .add("codeSnippets", ctx.codeAsText())
+                .build();
+
+        return chatClient.prompt(prompt).call().getResult().getOutputText();
+    }
+}
+
+
+
+=======================================================
+
+
+@Service
+public class RepoManagerService {
+
+    private final Path root = Paths.get("/data/repos");
+
+    public Path getRepo(ErrorPayload p) {
+        Path repoPath = root.resolve(p.getAppName());
+        if (!Files.exists(repoPath)) cloneRepo(p, repoPath);
+        else fetchRepo(p, repoPath);
+
+        checkoutBranchOrCommit(p, repoPath);
+        return repoPath;
+    }
+}
+
+
+============================================================
+
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-error-analyzer
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ai-error-analyzer
+  template:
+    metadata:
+      labels:
+        app: ai-error-analyzer
+    spec:
+      containers:
+        - name: analyzer
+          image: registry.company.com/ai-error-analyzer:1.0
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: prod
+            - name: OLLAMA_BASE_URL
+              value: http://ollama-service:11434
+          volumeMounts:
+            - name: repo-cache
+              mountPath: /data/repos
+      volumes:
+        - name: repo-cache
+          persistentVolumeClaim:
+            claimName: git-repo-pvc
+
+===================================================================
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: git-repo-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+
+
+========================================================================
+
+
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-error-analyzer
+spec:
+  selector:
+    app: ai-error-analyzer
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+
+
+============================================================================
+
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-error-analyzer-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ai-error-analyzer
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+
+
+============================================================
+
+@Data
+public class ErrorPayloadDto {
+
+    @NotBlank
+    private String appName;
+
+    @NotBlank
+    private String timestamp;
+
+    @NotBlank
+    private String stacktrace;
+
+    private String inputData;
+
+    @NotBlank
+    private String pipelineStage;
+
+    private String branch;
+    private String commitId;
+    private String repoUrl;
+    private String errorMessage;
+    private Map<String, Object> metadata;
+}
+
+=================================================================================================
+
+@Service
+@RequiredArgsConstructor
+public class ErrorEventProducer {
+
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper;
+
+    public void publish(ErrorPayloadDto dto) {
+        try {
+            String json = objectMapper.writeValueAsString(dto);
+            kafkaTemplate.send("etl-errors", dto.getAppName(), json);
+        } catch (Exception e) {
+            throw new RuntimeException("Kafka publish failed", e);
+        }
+    }
+}
+
+=================================================================================================
+
+@RestController
+@RequestMapping("/api/logs")
+@RequiredArgsConstructor
+public class ErrorLogController {
+
+    private final ErrorEventProducer producer;
+
+    @PostMapping("/error")
+    public ResponseEntity<?> receiveError(@Valid @RequestBody ErrorPayloadDto dto) {
+        producer.publish(dto);
+
+        return ResponseEntity.ok(Map.of(
+                "status", "OK",
+                "message", "Error event received",
+                "appName", dto.getAppName()
+        ));
+    }
+}
+
+=================================================================================================
+
+1.5 Application YAML
+
+spring:
+  kafka:
+    bootstrap-servers: kafka:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+
+====================================================================================================
+
+
+2. ERRORPAYLOAD JSON SCHEMA (FOR VALIDATION AND DOCUMENTATION)
+
+Save as:
+
+
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ETL Error Payload",
+  "type": "object",
+  "required": [
+    "appName",
+    "timestamp",
+    "stacktrace",
+    "pipelineStage"
+  ],
+  "properties": {
+    "appName": { "type": "string" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "stacktrace": { "type": "string" },
+    "pipelineStage": { "type": "string" },
+    "branch": { "type": "string" },
+    "commitId": { "type": "string" },
+    "repoUrl": { "type": "string" },
+    "errorMessage": { "type": "string" },
+    "inputData": { "type": "string" },
+    "metadata": { "type": "object" }
+  }
+}
+
+====================================================================================================
+
+✅ 3. STACKTRACE PARSER IMPLEMENTATION
+
+Parses class name, file name, and line number from Java stacktrace.
+
+3.1 Stacktrace Location DTO
+@Data
+@AllArgsConstructor
+public class StackLocation {
+    private String className;
+    private String fileName;
+    private int lineNumber;
+
+    public String classPath() {
+        return className.replace('.', '/') + ".java";
+    }
+}
+====================================================================================================
+
+3.2 Stacktrace Parser Utility
+
+
+public class StacktraceParser {
+
+    private static final Pattern PATTERN =
+            Pattern.compile("at\\s+([\\w\\.\\$]+)\\((\\w+\\.java):(\\d+)\\)");
+
+    public static StackLocation extract(String stacktrace) {
+
+        if (stacktrace == null) return null;
+
+        String[] lines = stacktrace.split("\n");
+
+        for (String line : lines) {
+            Matcher m = PATTERN.matcher(line.trim());
+            if (m.find()) {
+                return new StackLocation(
+                        m.group(1),            // class full name
+                        m.group(2),            // filename.java
+                        Integer.parseInt(m.group(3)) // line number
+                );
+            }
+        }
+        return null;
+    }
+}
+
+
+✅ 4. COMPLETE GITHUB ACTIONS CI/CD PIPELINE
+
+Supports:
+
+build
+
+test
+
+Docker image
+
+push to ECR/GHCR
+
+deploy to EKS via kubectl
+
+You only update registry details.
+
+=============================================================================
+4.1 .github/workflows/cicd.yml
+
+
+
+name: AI Analyzer CI/CD
+
+on:
+  push:
+    branches: [ main, release-* ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Build with Maven
+        run: mvn -B clean package
+
+      - name: Run Tests
+        run: mvn test
+
+      - name: Build Docker Image
+        run: |
+          docker build -t ${{ secrets.REGISTRY }}/ai-error-analyzer:${{ github.sha }} .
+
+      - name: Login to Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Push Docker Image
+        run: |
+          docker push ${{ secrets.REGISTRY }}/ai-error-analyzer:${{ github.sha }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ap-south-1
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ai-error-analyzer-cluster
+
+      - name: Set Docker Image in Manifest
+        run: |
+          sed -i "s|IMAGE_TAG|${{ github.sha }}|g" k8s/deployment.yml
+
+      - name: Apply K8s Manifests
+        run: |
+          kubectl apply -f k8s/
+
+
+=============================================================================
+
+
+✅ 1. FULL PGVECTOR SCHEMA + SQL INIT
+
+This sets up a Postgres + PGVector database for storing embeddings and RAG retrieval.
+
+1.1 Database Schema (Postgres + PGVector)
+
+
+
+-- Create extension for vector support
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Table for storing code embeddings
+CREATE TABLE IF NOT EXISTS code_embeddings (
+    id SERIAL PRIMARY KEY,
+    app_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    method_name TEXT,
+    pipeline_stage TEXT,
+    content TEXT NOT NULL,
+    embedding vector(1536),  -- assuming Gemma3:1b embedding size
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Index for similarity search
+CREATE INDEX IF NOT EXISTS idx_code_embedding_vector
+ON code_embeddings
+USING ivfflat (embedding vector_l2_ops)
+WITH (lists = 100);
+
+-- Table for storing persona and specs embeddings
+CREATE TABLE IF NOT EXISTS persona_embeddings (
+    id SERIAL PRIMARY KEY,
+    app_name TEXT NOT NULL,
+    content TEXT NOT NULL,
+    embedding vector(1536),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_persona_embedding_vector
+ON persona_embeddings
+USING ivfflat (embedding vector_l2_ops)
+WITH (lists = 50);
+
+-- Table for storing historical errors & analysis
+CREATE TABLE IF NOT EXISTS error_analysis_history (
+    id SERIAL PRIMARY KEY,
+    app_name TEXT NOT NULL,
+    stacktrace TEXT NOT NULL,
+    payload JSONB,
+    root_cause JSONB,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+
+====================================================================
+
+1.2 Notes
+
+vector(1536) corresponds to the Gemma3:1b embedding size. Adjust if model changes.
+
+ivfflat index improves similarity search.
+
+code_embeddings stores actual code chunks and metadata for RAG.
+
+persona_embeddings stores persona and pipeline specification content.
+
+error_analysis_history tracks analyzed errors for deduplication.
+
+✅ 2. COMPLETE REPO MANAGER UNIT TESTS
+
+We will test:
+
+Repo clone if missing
+
+Fetch and checkout branch
+
+Checkout specific commit
+
+Handle invalid repo
+
+2.1 RepoManagerServiceTest.java
+
+
+@SpringBootTest
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+public class RepoManagerServiceTest {
+
+    @Autowired
+    private RepoManagerService repoManager;
+
+    private final String testApp = "test-etl-app";
+
+    private final Path rootPath = Paths.get("/tmp/repos-test");
+
+    @BeforeAll
+    void setup() throws IOException {
+        if (Files.exists(rootPath)) {
+            FileUtils.deleteDirectory(rootPath.toFile());
+        }
+        Files.createDirectories(rootPath);
+        ReflectionTestUtils.setField(repoManager, "root", rootPath);
+    }
+
+    @Test
+    void testCloneRepo() throws Exception {
+        ErrorPayload payload = new ErrorPayload();
+        payload.setAppName(testApp);
+        payload.setRepoUrl("https://github.com/spring-projects/spring-petclinic.git");
+        payload.setBranch("main");
+
+        Path repoPath = repoManager.getRepo(payload);
+
+        Assertions.assertTrue(Files.exists(repoPath.resolve("pom.xml")));
+    }
+
+    @Test
+    void testCheckoutCommit() throws Exception {
+        ErrorPayload payload = new ErrorPayload();
+        payload.setAppName(testApp);
+        payload.setRepoUrl("https://github.com/spring-projects/spring-petclinic.git");
+        payload.setCommitId("8d8b4b3"); // Example short commit id
+
+        Path repoPath = repoManager.getRepo(payload);
+
+        Assertions.assertTrue(Files.exists(repoPath.resolve("pom.xml")));
+    }
+
+    @Test
+    void testInvalidRepo() {
+        ErrorPayload payload = new ErrorPayload();
+        payload.setAppName("invalid-repo");
+        payload.setRepoUrl("https://github.com/invalid/repo.git");
+
+        Assertions.assertThrows(RuntimeException.class, () -> repoManager.getRepo(payload));
+    }
+
+    @AfterAll
+    void cleanup() throws IOException {
+        if (Files.exists(rootPath)) {
+            FileUtils.deleteDirectory(rootPath.toFile());
+        }
+    }
+}
+
+
+✅ 3. RAG INDEXER CRONJOB (CODE + MANIFEST)
+
+This periodically scans codebases and persona files, generates embeddings, and updates PGVector.
+
+3.1 RAG Indexer Service
+
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class RagIndexerService {
+
+    private final RepoManagerService repoManager;
+    private final VectorStore vectorStore; // PGVector-backed
+    private final PersonaService personaService;
+
+    @Scheduled(cron = "0 0 * * * *") // every hour
+    public void indexAllApps() {
+        log.info("Starting RAG indexing job...");
+
+        List<String> apps = repoManager.getAllApps();
+
+        for (String app : apps) {
+            try {
+                Path repoPath = repoManager.getRepoByAppName(app);
+                indexCode(repoPath, app);
+                indexPersona(app);
+            } catch (Exception e) {
+                log.error("RAG indexing failed for app {}: {}", app, e.getMessage());
+            }
+        }
+        log.info("RAG indexing completed.");
+    }
+
+    private void indexCode(Path repoPath, String appName) throws IOException {
+        Files.walk(repoPath.resolve("src/main/java"))
+                .filter(Files::isRegularFile)
+                .filter(p -> p.toString().endsWith(".java"))
+                .forEach(file -> {
+                    try {
+                        String content = Files.readString(file);
+                        vectorStore.upsertCodeEmbedding(appName, file.toString(), content);
+                    } catch (IOException e) {
+                        log.warn("Failed to read file {}: {}", file, e.getMessage());
+                    }
+                });
+    }
+
+    private void indexPersona(String appName) {
+        String personaContent = personaService.loadPersona(appName);
+        vectorStore.upsertPersonaEmbedding(appName, personaContent);
+    }
+}
+
+
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rag-indexer
+spec:
+  schedule: "0 * * * *" # every hour
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: rag-indexer
+              image: registry.company.com/ai-error-analyzer:1.0
+              command: ["java", "-jar", "/app/ai-analyzer.jar", "--spring.profiles.active=prod", "--rag.indexer=true"]
+              volumeMounts:
+                - name: repo-cache
+                  mountPath: /data/repos
+          restartPolicy: OnFailure
+          volumes:
+            - name: repo-cache
+              persistentVolumeClaim:
+                claimName: git-repo-pvc
+
+
+
+
+
+💡 Notes / Best Practices
+
+PGVector: Make sure ivfflat is tuned (lists = sqrt(#vectors)) for performance.
+
+RAG CronJob: Can adjust frequency depending on code update rate.
+
+Unit Tests: Can extend to simulate branch updates and persona changes.
+
+Vector Upserts: Add batching to avoid memory spikes for large codebases.
+
+
+
+
+2. RAG INDEXER CRONJOB (CODE + MANIFEST)
+Purpose
+
+Your repository code and persona files are continuously evolving:
+
+ETL apps are updated frequently
+
+Branches and commits change
+
+Persona files may be updated
+
+The RAG Indexer CronJob ensures that the vector database is always up-to-date.
+
+Why it's needed
+
+Precompute Embeddings
+
+Computing embeddings on-demand (when an error occurs) is too slow for production.
+
+CronJob pre-generates embeddings for all code and persona files, so the analyzer can retrieve them instantly.
+
+Keep RAG Context Current
+
+When developers push new code or update personas, the embeddings need to be refreshed.
+
+CronJob scans repos and persona files regularly, updates PGVector.
+
+Reduce Latency & Load on LLM
+
+Without precomputed embeddings, every analysis request would trigger embedding computations for large files → high memory + CPU usage.
+
+Pre-indexing ensures fast RAG retrieval, making LLM reasoning real-time.
+
+Kubernetes-Friendly
+
+Running as a CronJob in EKS ensures the process is isolated, can scale independently, and won’t block the main analyzer pods.
+
+How They Fit Together
+ETL App Error → Log API → Kafka → Analyzer Worker → RAG Context → LLM → Root Cause
+       ↑
+       |---- RAG Indexer CronJob periodically refreshes PGVector embeddings
+       |---- Persona & pipeline specs stored as embeddings
+
+
+Key Takeaways:
+
+PGVector is the storage layer for RAG.
+
+RAG Indexer CronJob keeps PGVector embeddings fresh, fast, and ready for retrieval.
+
+Without either of these, your AI analyzer cannot reliably retrieve the correct code/persona context, and root cause detection will be slower, less accurate, or impossible for large apps.
+
+
+
+
+
